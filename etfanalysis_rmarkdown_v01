@@ -1,0 +1,341 @@
+---
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r libraries, message=FALSE, warning=FALSE, include=FALSE, results=F}
+library(tidyverse)
+library(readxl)
+library(tidyquant)
+source("funct_yahooimport.R")
+# library(signal)
+```
+
+```{r, setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  comment = '',
+  fig.width = 12,
+  fig.height = 6
+)
+```
+
+# Analysis of free ETFs on Degiro
+
+```{r yahoo_dataextraction, include=F}
+
+# Fetch ETF list ---------------------------------------------------------------
+
+degiroetfmeta <- read_excel("../data_etf/etf_library_v01.xlsx")
+
+# Grab companies that have a yahoo code ----------------------------------------
+
+degiroetfmeta2 <- degiroetfmeta %>% 
+  dplyr::filter(!is.na(yahoo_code)
+  )
+
+# Fetch those from Yahoo -------------------------------------------------------
+
+# Check whether we already have data from today there
+
+if(file.exists(paste("../data_etf/historicaldata/",
+                      Sys.Date(),
+                      "_hitoricdata.csv",
+                      sep = ""
+               )
+   ) == F
+) {
+  
+  # Fetch data if there is no file present, adjust nr. of tries and date range
+  
+  allstock <- yahoo_history(toimport = degiroetfmeta2$yahoo_code,
+                            test_nr = 2,
+                            startdate = Sys.Date()-(365*30),
+                            enddate = Sys.Date()
+  )
+  
+  # Merge metadata to stockdata
+  
+  tobeadded <- degiroetfmeta2
+  
+  allstock2 <- right_join(tobeadded,
+                          allstock,
+                          by = c("yahoo_code" = "symbol")
+  ) %>% 
+    rename(symbol = yahoo_code)
+  
+  # Write obtained data to excel
+  
+  write_excel_csv(allstock2,
+                  paste("../data_etf/historicaldata/",
+                        Sys.Date(),
+                        "_hitoricdata.csv",
+                        sep = ""
+                  )
+  )
+  
+  totnr <- length(degiroetfmeta2$yahoo_code)
+  totnrgotten <- length(unique(allstock2$symbol))
+  
+} else {
+  allstock2 <- read_csv(paste("../data_etf/historicaldata/",
+                       Sys.Date(),
+                       "_hitoricdata.csv",
+                       sep = ""
+              )
+  )
+  
+  totnr <- length(degiroetfmeta2$yahoo_code)
+  totnrgotten <- length(unique(allstock2$symbol))
+  
+}
+  
+```
+
+We have looked for `r totnr` of trackers and have obtained `r totnrgotten`.
+
+```{r, include=F}
+# Select date
+
+
+# startdate <- as.Date("2021-02-07") # before dip1
+# enddate <- as.Date("2020-03-30") # bottom dip1
+# enddate <- as.Date(max(allstock$date))
+# startdate <- as.Date("2021-10-20") # Russia change of repo rate
+startdate <- as.Date("2022-01-01")
+enddate <- Sys.Date()
+
+
+
+# startdate <- as.Date("2021-05-07") # somewhere before dip
+# startdate <- as.Date("2020-01-01")
+# Selection parameters ---------------------------------------------------------
+
+allstock3 <- allstock2 %>% 
+  dplyr::filter(date >= startdate,
+         date <= enddate
+  ) #%>%
+  # dplyr::filter(region == "Worldwide") %>%
+  # dplyr::filter(region == "Switzerland")# %>%
+  # dplyr::filter(type == "Accumulating") # %>%
+  # dplyr::filter(investmenttype != "bond") #%>%
+  # mutate(region = recode(region,
+  #                        "China & Hong-Kong" = "China",
+  #                        "Asia Pacific" = "China",
+  #                        
+  #                        
+  #                 )
+  # )
+
+```
+
+```{r, include=F}
+
+# Get our benchmark, add to new column -----------------------------------------
+
+sandp500 <- tq_get("^GSPC",
+                   get = "stock.prices"
+) %>%
+  select(date, adjusted)
+
+allstock4 <- right_join(sandp500,
+                        allstock3,
+                        suffix = c("_sp", ""),
+                        by = "date"
+) %>%
+  dplyr::filter(!is.na(adjusted_sp)) %>% 
+  dplyr::filter(!is.na(adjusted))
+
+# Fetch euro prices ------------------------------------------------------------
+
+eurchf <- tq_get("EURCHF=X",
+                 get = "stock.prices"
+) %>%
+  select(date, adjusted)
+
+allstock5 <- right_join(eurchf,
+                        allstock4,
+                        suffix = c("_eur", ""),
+                        by = "date"
+) %>%
+  dplyr::filter(!is.na(adjusted_eur))
+
+```
+
+```{r, include=F}
+# Add another column taking into account the conversion rate of EUR to CHF -----
+
+allstock6 <- allstock5 %>% 
+  mutate(adjusted_eurconv = adjusted * adjusted_eur* (1-0.02))
+
+```
+
+```{r, include=F}
+# Merging everything into a single dataset -------------------------------------
+
+allstock7 <- allstock6 %>% 
+  ungroup() %>% 
+  droplevels() %>% 
+  pivot_longer(c("adjusted_sp",
+                 "adjusted",
+                 "adjusted_eurconv",
+               ),
+               names_to = "plottingtype",
+               values_to = "price"
+  )
+
+```
+
+```{r, include=F}
+# Percentage calculation -------------------------------------------------------  
+
+allstock8 <- allstock7 %>% 
+  group_by(symbol, plottingtype) %>%
+  mutate(price_per = (price-first(price))/
+                          first(price)*100
+  ) %>%
+  # kick out those with unrealistic percentage increases
+  filter(last(price_per) < 150) %>% 
+  ungroup() %>%
+  droplevels()
+  
+# Create plot for each level of user selected differentiation ------------------
+
+```
+
+```{r include=F}
+# allstock8 <- allstock8 %>%
+#   filter(adjusted != "adjusted_euroconv")
+```
+
+```{r echo=F, message = FALSE, warning = FALSE, fig.width=15, fig.height=10}
+
+# Splitting data into regions --------------------------------------------------
+
+regions <- unique(allstock8$region)
+for(x in seq_along(regions)) {
+
+  # Grab data based on separator and remove NA values
+  temp_extr_data <- allstock8 %>% 
+    dplyr::filter(region == regions[x]) %>% 
+    dplyr::filter(plottingtype != "adjusted_eurconv") %>% 
+    rowwise() %>% 
+    mutate(symbol = paste(symbol,
+                          # paste(strwrap(justetf_comment, 100), collapse = "\n"),
+                          name_justetf,
+                          comment_me,
+                          sep = "\n"
+                    )
+    )
+  
+  summarystuff <- temp_extr_data %>% 
+  group_by(symbol, plottingtype, region) %>% 
+  # Calculate max and min for each stock
+  summarise(increase = last(price_per))
+  
+  temp_extr_sum <- summarystuff %>%
+    dplyr::filter(region == regions[x])
+
+  print(
+  ggplot(data = temp_extr_data,
+         aes(x = date,
+             y = price_per,
+             color = plottingtype,
+             linetype = plottingtype
+         )
+  ) +
+    geom_line() +
+    
+    # Add percentage increase to each stock
+    geom_text(data = temp_extr_sum,
+              aes(x = startdate,
+                  y = increase,
+                  label = paste(round(increase, 0), " %", sep = ""),
+                  color = NULL,
+                  linetype = NULL
+              ),
+              show.legend = FALSE,
+              hjust = "left",
+              vjust = "bottom",
+              nudge_y = 1,
+              size = 2.2
+    ) +
+
+    geom_hline(data = temp_extr_sum,
+               aes(yintercept = increase,
+                   color = plottingtype
+               ),
+               alpha = 0.5,
+               show.legend = FALSE
+    ) +
+    
+    geom_vline(xintercept = as.Date("2021-10-22"),
+               show.legend = FALSE) +
+    
+    xlab("Date") +
+    ylab("Increase  [%]") +
+    
+    scale_color_manual(limits = c("adjusted", "adjusted_sp"),
+                       labels = c("ETF", "S&P500"),
+                       values = c("red", "black")
+    ) +
+    scale_linetype_manual(limits = c("adjusted", "adjusted_sp"),
+                       labels = c("ETF", "S&P500"),
+                       values = c("solid", "dashed")
+    ) +
+    labs(title = regions[[x]],
+         subtitle = paste("between ",
+                          first(temp_extr_data$date),
+                          " until ",
+                          last(temp_extr_data$date),
+                          " (",
+                          round(as.double(enddate-startdate)/365, 1),
+                          " years)",
+                          # "     ",
+                          # "(+",
+                          # round(
+                          #   last(temp_extr_data$adjusted_perc) -
+                          #   first(temp_extr_data$adjusted_perc),
+                          #   2
+                          # ),
+                          # " %)",
+                          # "\n",
+                          # "red: S&P 500",
+                          # "\n",
+                          # "green: total expense ratio and EUR/CHF conversion upon going out",
+                          sep = ""
+                    ),
+         color = "",
+         linetype = ""
+    ) +
+    
+    # # scale_x_date(limits = c(as.Date(), NA)) +
+    # # geom_vline(xintercept = F +
+
+
+    facet_wrap(facets = vars(symbol)) +
+    # theme(strip.text.x = element_text(angle = 0))
+    theme(strip.text.x = element_text(size = 6),
+          aspect.ratio=0.5
+    )
+  )
+
+ }
+```
+
+
+```{r echo=F, fig.width=16, fig.height=23}
+
+
+ggplot(dplyr::filter(allstock8,
+                     plottingtype == "adjusted"
+       ),
+       aes(date,
+           price_per,
+           group = symbol,
+           color = sectors
+       )
+) +
+  geom_line() +
+  facet_wrap(vars(region))
+```
